@@ -95,13 +95,10 @@ If you find this repository useful for your research, please consider citing our
 
 ```bibtex
 @article{chen2025comodo,
-  title={COMODO: Cross-Modal Video-to-IMU Distillation for Efficient Egocentric Human Activity Recognition},
+  title={Comodo: Cross-modal video-to-imu distillation for efficient egocentric human activity recognition},
   author={Chen, Baiyu and Wongso, Wilson and Li, Zechen and Khaokaew, Yonchanok and Xue, Hao and Salim, Flora},
-  year={2025},
-  eprint={2503.07259},
-  primaryClass={cs.CV},
-  note={arXiv preprint},
-  url={https://arxiv.org/abs/2503.07259}
+  journal={arXiv preprint arXiv:2503.07259},
+  year={2025}
 }
 ```
 

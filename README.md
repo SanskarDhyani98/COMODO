@@ -94,7 +94,7 @@ There's a lot of outstanding work on time-series and human activity recognition!
 If you find this repository useful for your research, please consider citing our paper:
 
 ```bibtex
-@misc{chen2025comodo,
+@article{chen2025comodo,
   title={COMODO: Cross-Modal Video-to-IMU Distillation for Efficient Egocentric Human Activity Recognition},
   author={Chen, Baiyu and Wongso, Wilson and Li, Zechen and Khaokaew, Yonchanok and Xue, Hao and Salim, Flora},
   year={2025},

@@ -20,6 +20,9 @@ document.querySelectorAll(".tab").forEach((t) => {
     if (t.dataset.tab === "improvements" && !improvementsBootstrapped) {
       bootstrapImprovements();
     }
+    if (t.dataset.tab === "live" && !liveBootstrapped) {
+      bootstrapLive();
+    }
   });
 });
 
@@ -29,7 +32,12 @@ let activitiesLoaded = false;
 let resultsLoaded = false;
 let imuChart, embedChart, simChart, resultsChart;
 let sweepChart, batchedChart, salChart;
+let batchAccChart, batchConfChart;
+let liveImuChart, liveProbChart;
+let liveBootstrapped = false;
 let improvementsBootstrapped = false;
+let liveCachedIMUBlob = null;            // last uploaded CSV
+let liveCachedActivities = [];
 
 // ─── boot ─────────────────────────────────────────────────
 async function boot() {
@@ -349,6 +357,16 @@ async function bootstrapImprovements() {
       opt.textContent = a.label;
       sel.appendChild(opt);
     });
+    // also fill the A/B activity dropdown
+    const abSel = document.getElementById("abActivity");
+    abSel.innerHTML = "";
+    acts.activities.forEach((a) => {
+      const opt = document.createElement("option");
+      opt.value = a.id;
+      opt.textContent = a.label;
+      if (a.id === "cycling") opt.selected = true; // the killer demo case
+      abSel.appendChild(opt);
+    });
   }
   // Show the cached batched-vs-sequential numbers immediately (needs model warmup).
   try {
@@ -569,6 +587,160 @@ function drawSaliency(r) {
   });
 }
 
+// ─── Improvements tab: SINGLE-query A/B ──────────────────
+document.getElementById("abBtn").addEventListener("click", runSingleAB);
+
+async function runSingleAB() {
+  const activity = document.getElementById("abActivity").value || "cycling";
+  const seed = +document.getElementById("abSeed").value || 4242;
+  const extraNoise = +document.getElementById("abNoise").value || 0.5;
+  const status = document.getElementById("abStatus");
+  status.textContent = "running…";
+  status.className = "status-pill busy";
+  try {
+    const r = await fetch("/api/infer-ab", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ activity, seed, extra_noise: extraNoise }),
+    }).then((x) => x.json());
+    drawSingleAB(r);
+    status.textContent = "done";
+    status.className = "status-pill done";
+  } catch (e) {
+    status.textContent = "error";
+    status.className = "status-pill err";
+    console.error(e);
+  }
+}
+
+function drawSingleAB(r) {
+  const grid = document.getElementById("abGrid");
+  grid.innerHTML = "";
+  r.results.forEach((cell) => {
+    const div = document.createElement("div");
+    const cls = cell.correct ? "correct" : "wrong";
+    const icon = cell.correct ? "✓" : "✗";
+    div.className = "ab-cell " + cls;
+    div.innerHTML = `
+      <span class="ab-icon ${cell.correct ? "ok" : "bad"}">${icon}</span>
+      <div class="ab-name">${cell.config}</div>
+      <div class="ab-pred">${cell.predicted_label}</div>
+      <div class="ab-meta">
+        confidence: <b>${(cell.predicted_confidence * 100).toFixed(1)}%</b><br>
+        latency:    <b>${cell.latency_ms} ms</b><br>
+        true label: <b>${r.true_label}</b>
+      </div>`;
+    grid.appendChild(div);
+  });
+}
+
+// ─── Improvements tab: BATCH A/B (the accuracy chart) ─────
+document.getElementById("batchBtn").addEventListener("click", runBatchAB);
+
+async function runBatchAB() {
+  const samples = +document.getElementById("batchSamples").value || 5;
+  const noise = +document.getElementById("batchNoise").value || 0.3;
+  const status = document.getElementById("batchStatus");
+  const btn = document.getElementById("batchBtn");
+  btn.disabled = true;
+  status.textContent = "running…";
+  status.className = "status-pill busy";
+  try {
+    const r = await fetch("/api/batch-ab", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ samples_per_activity: samples, extra_noise: noise }),
+    }).then((x) => x.json());
+    drawBatchAB(r);
+    status.textContent = `done in ${r.elapsed_s}s`;
+    status.className = "status-pill done";
+  } catch (e) {
+    status.textContent = "error";
+    status.className = "status-pill err";
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function drawBatchAB(r) {
+  const configs = Object.keys(r.results);
+  const colors = ["#fb7185", "#facc15", "#7c83ff", "#5cd2c6"];
+  const accData = configs.map((c) => r.results[c].accuracy_pct);
+  const confData = configs.map((c) => r.results[c].mean_confidence_pct);
+  const deltas = configs.map((c) => r.results[c].accuracy_delta_vs_baseline);
+
+  document.getElementById("batchTotalLabel").textContent = r.total_queries;
+
+  if (batchAccChart) batchAccChart.destroy();
+  batchAccChart = new Chart(document.getElementById("batchAccChart"), {
+    type: "bar",
+    data: {
+      labels: configs,
+      datasets: [{
+        label: "top-1 accuracy (%)",
+        data: accData,
+        backgroundColor: colors,
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      animation: { duration: 400 },
+      scales: { y: { beginAtZero: true, max: 100, title: { display: true, text: "accuracy (%)" } } },
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `top-1 accuracy on ${r.total_queries} queries (σ=${r.extra_noise})`,
+          color: "#e7ecff",
+        },
+        tooltip: {
+          callbacks: {
+            afterLabel: (ctx) => {
+              const d = deltas[ctx.dataIndex];
+              if (ctx.dataIndex === 0) return "baseline";
+              return (d >= 0 ? "+" : "") + d + " pp vs baseline";
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (batchConfChart) batchConfChart.destroy();
+  batchConfChart = new Chart(document.getElementById("batchConfChart"), {
+    type: "bar",
+    data: {
+      labels: configs,
+      datasets: [{
+        label: "mean confidence (%)",
+        data: confData,
+        backgroundColor: colors,
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      animation: { duration: 400 },
+      scales: { y: { beginAtZero: true, max: 100, title: { display: true, text: "mean predicted-class confidence (%)" } } },
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: "calibrated confidence per config", color: "#e7ecff" },
+      },
+    },
+  });
+
+  const lines = configs.map((c) => {
+    const x = r.results[c];
+    const d = x.accuracy_delta_vs_baseline;
+    const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "·";
+    const dStr = (d >= 0 ? "+" : "") + d.toFixed(2);
+    return `<b>${c.padEnd(20, " ")}</b>  acc ${x.accuracy_pct.toFixed(1)}%  (${arrow} ${dStr} pp)   conf ${x.mean_confidence_pct.toFixed(1)}%   lat ${x.mean_latency_ms.toFixed(1)} ms   ${x.n_correct}/${x.n_total}`;
+  });
+  document.getElementById("batchKv").innerHTML = lines.join("\n");
+}
+
 function fillResultsTable(summary) {
   const tbody = document.querySelector("#resultsTable tbody");
   tbody.innerHTML = "";
@@ -591,4 +763,203 @@ function fillResultsTable(summary) {
       <td>${r.n_runs}</td>`;
     tbody.appendChild(tr);
   }
+}
+
+// ─────────────────────── LIVE END-TO-END TAB ───────────────────────────
+async function bootstrapLive() {
+  liveBootstrapped = true;
+  const r = await fetch("/api/activities").then((x) => x.json());
+  liveCachedActivities = r.activities;
+
+  // fill the example-pick row with a button per activity
+  const exRow = document.getElementById("exampleRow");
+  exRow.innerHTML = "";
+  r.activities.forEach((a) => {
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.textContent = "Use " + a.label;
+    btn.addEventListener("click", () => useExampleCSV(a.id, a.label));
+    exRow.appendChild(btn);
+  });
+
+  // fill the optional-true-label dropdown
+  const tl = document.getElementById("liveTrueLabel");
+  r.activities.forEach((a) => {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = a.label;
+    tl.appendChild(opt);
+  });
+
+  setupDropzone("videoDrop", "videoFile", handleVideoFile);
+  setupDropzone("imuDrop",   "imuFile",   handleImuFile);
+
+  document.getElementById("liveRunBtn").addEventListener("click", runLiveInference);
+}
+
+function setupDropzone(zoneId, inputId, onFile) {
+  const zone = document.getElementById(zoneId);
+  const input = document.getElementById(inputId);
+  zone.addEventListener("click", () => input.click());
+  input.addEventListener("change", (e) => {
+    if (e.target.files && e.target.files[0]) onFile(e.target.files[0]);
+  });
+  ["dragenter", "dragover"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("dragover"); })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove("dragover"); })
+  );
+  zone.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]);
+  });
+}
+
+function handleVideoFile(file) {
+  const url = URL.createObjectURL(file);
+  const v = document.getElementById("videoPlayer");
+  v.src = url;
+  v.style.display = "block";
+  v.play().catch(() => {}); // autoplay may be blocked
+  const zone = document.getElementById("videoDrop");
+  let tag = zone.querySelector(".dz-file");
+  if (!tag) {
+    tag = document.createElement("div");
+    tag.className = "dz-file";
+    zone.querySelector(".dz-inner").appendChild(tag);
+  }
+  tag.textContent = file.name + "  (" + Math.round(file.size / 1024) + " KB)";
+}
+
+function handleImuFile(file) {
+  liveCachedIMUBlob = file;
+  const zone = document.getElementById("imuDrop");
+  let tag = zone.querySelector(".dz-file");
+  if (!tag) {
+    tag = document.createElement("div");
+    tag.className = "dz-file";
+    zone.querySelector(".dz-inner").appendChild(tag);
+  }
+  tag.textContent = file.name + "  (" + Math.round(file.size / 1024) + " KB)";
+  document.getElementById("liveRunBtn").disabled = false;
+  const s = document.getElementById("liveStatus");
+  s.textContent = "ready: " + file.name;
+  s.className = "status-pill";
+}
+
+async function useExampleCSV(activityId, label) {
+  // Pull the server-rendered example CSV, turn into a File so the upload
+  // path is identical to "user-uploaded".
+  const resp = await fetch("/api/example-csv/" + activityId + "?seed=42");
+  const text = await resp.text();
+  const blob = new Blob([text], { type: "text/csv" });
+  const file = new File([blob], "comodo_" + activityId + ".csv", { type: "text/csv" });
+  handleImuFile(file);
+  // Auto-set the "true label" dropdown to match — useful for accuracy check.
+  document.getElementById("liveTrueLabel").value = activityId;
+}
+
+async function runLiveInference() {
+  if (!liveCachedIMUBlob) return;
+  const tta = document.getElementById("liveTta").checked;
+  const kproto = document.getElementById("liveKproto").checked;
+  const trueLabel = document.getElementById("liveTrueLabel").value;
+  const status = document.getElementById("liveStatus");
+  status.textContent = "running model…";
+  status.className = "status-pill busy";
+
+  const fd = new FormData();
+  fd.append("file", liveCachedIMUBlob);
+  fd.append("tta", tta ? "true" : "false");
+  fd.append("multi_prototype", kproto ? "true" : "false");
+  if (trueLabel) fd.append("true_label", trueLabel);
+
+  try {
+    const r = await fetch("/api/infer-upload", { method: "POST", body: fd })
+      .then((x) => x.json().then((j) => ({ ok: x.ok, j })));
+    if (!r.ok) throw new Error(r.j.detail || "upload failed");
+    renderLiveResult(r.j);
+    status.textContent = `done in ${r.j.latency_ms} ms`;
+    status.className = "status-pill done";
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+    status.className = "status-pill err";
+    console.error(e);
+  }
+}
+
+function renderLiveResult(r) {
+  // 1. signal plot (re-uses CHANNEL_COLORS)
+  const labels = r.samples[0].map((_, i) => i * r.sample_step);
+  const datasets = r.samples.map((s, i) => ({
+    label: r.channels[i],
+    data: s,
+    borderColor: CHANNEL_COLORS[i],
+    backgroundColor: CHANNEL_COLORS[i] + "33",
+    borderWidth: 1.3,
+    pointRadius: 0,
+    tension: 0.25,
+  }));
+  if (liveImuChart) liveImuChart.destroy();
+  liveImuChart = new Chart(document.getElementById("liveImuChart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      interaction: { mode: "nearest", intersect: false },
+      scales: {
+        x: { title: { display: true, text: "sample index (resampled)" } },
+        y: { title: { display: true, text: "sensor value" } },
+      },
+      plugins: { legend: { position: "bottom", labels: { boxWidth: 14, padding: 10 } } },
+    },
+  });
+
+  // 2. metadata
+  document.getElementById("liveImuMeta").innerHTML =
+    `<b>filename:</b>        ${r.filename}
+<b>uploaded shape:</b>  ${r.original_shape[0]} × ${r.original_shape[1]}
+<b>resampled to:</b>    ${r.resampled_shape[0]} × ${r.resampled_shape[1]}
+<b>config:</b>          ${r.tta ? "TTA×" + r.tta_n : "TTA off"}, ${r.multi_prototype ? "K=" + r.k_prototypes : "K=1"}
+<b>forward pass:</b>    ${r.latency_ms} ms`;
+
+  // 3. prediction box
+  const box = document.getElementById("livePredBox");
+  let cls = "";
+  if (r.correct === true)  cls = "correct";
+  if (r.correct === false) cls = "wrong";
+  box.className = "pred-box " + cls;
+  const icon = r.correct === true ? "✓" : r.correct === false ? "✗" : "";
+  const trueLine = r.true_label
+    ? `<div style="font-size:13px;color:var(--muted);margin-top:8px">true label: <b>${r.true_label}</b></div>`
+    : `<div style="font-size:13px;color:var(--muted);margin-top:8px">true label not supplied (we can't compute accuracy)</div>`;
+  box.innerHTML =
+    `<div style="font-size:13px;color:var(--muted);margin-bottom:6px">predicted</div>` +
+    `<div><b>${r.predicted_label}</b> ${icon}<span style="font-size:14px;color:var(--muted);font-weight:400"> · ${(r.predicted_confidence * 100).toFixed(1)}% confident</span></div>` +
+    trueLine;
+
+  // 4. per-class probability chart
+  const keys = Object.keys(r.confidence);
+  const vals = keys.map((k) => r.confidence[k] * 100);
+  if (liveProbChart) liveProbChart.destroy();
+  liveProbChart = new Chart(document.getElementById("liveProbChart"), {
+    type: "bar",
+    data: {
+      labels: keys,
+      datasets: [{
+        label: "predicted probability (%)",
+        data: vals,
+        backgroundColor: keys.map((k) => k === r.predicted ? "#5cd2c6" : "#7c83ff"),
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      animation: { duration: 400 },
+      scales: { x: { beginAtZero: true, max: 100, title: { display: true, text: "calibrated probability (%)" } } },
+      plugins: { legend: { display: false } },
+    },
+  });
 }

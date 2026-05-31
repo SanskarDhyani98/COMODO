@@ -26,8 +26,8 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -301,6 +301,21 @@ class InferRequest(BaseModel):
 class LossRequest(BaseModel):
     activity: str
     seed: int = 42
+
+
+class BatchABRequest(BaseModel):
+    """A/B benchmark: run N queries through all 4 configs at one noise level."""
+    samples_per_activity: int = 5
+    extra_noise: float = 0.3
+    perturb_strength: float = 0.15
+    base_seed: int = 5000
+
+
+class SingleABRequest(BaseModel):
+    """A/B benchmark: run ONE query through all 4 configs."""
+    activity: str
+    seed: int = 42
+    extra_noise: float = 0.3
 
 
 class NoiseSweepRequest(BaseModel):
@@ -605,6 +620,247 @@ def noise_sweep(req: NoiseSweepRequest) -> dict[str, Any]:
         "samples_per_point": req.samples_per_activity * len(activities),
         "elapsed_s": round(time.time() - t_total, 2),
     }
+
+
+CONFIGS_AB: list[tuple[str, bool, bool]] = [
+    ("baseline",          False, False),
+    ("+ K-prototypes",    False, True),
+    ("+ TTA",             True,  False),
+    ("+ K-proto + TTA",   True,  True),
+]
+
+
+@app.post("/api/infer-ab")
+def infer_ab(req: SingleABRequest) -> dict[str, Any]:
+    """Run the SAME query through all 4 configs. The frontend uses this to
+    show the audience that improvements flip wrong predictions to correct ones.
+    """
+    if req.activity not in ACTIVITIES:
+        raise HTTPException(404, f"unknown activity: {req.activity}")
+    student = get_student()
+    imu = generate_imu(req.activity, seed=req.seed, extra_noise=req.extra_noise)
+    out = []
+    for name, tta, kproto in CONFIGS_AB:
+        _, sims, lat = _classify(student, imu, tta=tta, multi_prototype=kproto)
+        pred = max(sims, key=sims.get)
+        conf = softmax_confidence(sims)
+        out.append({
+            "config": name,
+            "tta": tta,
+            "multi_prototype": kproto,
+            "predicted": pred,
+            "predicted_label": ACTIVITIES[pred]["label"],
+            "predicted_confidence": float(conf[pred]),
+            "correct": pred == req.activity,
+            "latency_ms": round(lat, 1),
+            "top3": sorted(conf.items(), key=lambda x: -x[1])[:3],
+        })
+    return {
+        "activity": req.activity,
+        "true_label": ACTIVITIES[req.activity]["label"],
+        "extra_noise": req.extra_noise,
+        "seed": req.seed,
+        "results": out,
+    }
+
+
+@app.post("/api/batch-ab")
+def batch_ab(req: BatchABRequest) -> dict[str, Any]:
+    """Run a batch of queries through all 4 configs and report aggregate
+    accuracy / mean confidence / mean latency. This is the 'before vs after'
+    accuracy demonstration the audience sees on the Improvements tab.
+    """
+    student = get_student()
+    activities = list(ACTIVITIES.keys())
+    queries: list[tuple[str, np.ndarray]] = []
+    for a in activities:
+        for s in range(req.samples_per_activity):
+            imu = generate_imu(
+                a,
+                seed=req.base_seed + s,
+                extra_noise=req.extra_noise,
+                perturb_params=True,
+                perturb_strength=req.perturb_strength,
+            )
+            queries.append((a, imu))
+
+    out: dict[str, dict[str, Any]] = {}
+    t_total = time.time()
+    for name, tta, kproto in CONFIGS_AB:
+        n_correct = 0
+        confs: list[float] = []
+        latencies: list[float] = []
+        per_activity_correct: dict[str, int] = {a: 0 for a in activities}
+        per_activity_total: dict[str, int] = {a: 0 for a in activities}
+        for true_a, imu in queries:
+            _, sims, lat = _classify(student, imu, tta=tta, multi_prototype=kproto)
+            pred = max(sims, key=sims.get)
+            per_activity_total[true_a] += 1
+            if pred == true_a:
+                n_correct += 1
+                per_activity_correct[true_a] += 1
+            confs.append(softmax_confidence(sims)[pred])
+            latencies.append(lat)
+        out[name] = {
+            "accuracy_pct": round(n_correct / len(queries) * 100, 2),
+            "n_correct": n_correct,
+            "n_total": len(queries),
+            "mean_confidence_pct": round(float(np.mean(confs)) * 100, 2),
+            "mean_latency_ms": round(float(np.mean(latencies)), 2),
+            "per_activity_accuracy_pct": {
+                a: round(per_activity_correct[a] / per_activity_total[a] * 100, 2)
+                for a in activities
+            },
+            "tta": tta,
+            "multi_prototype": kproto,
+        }
+
+    base_acc = out["baseline"]["accuracy_pct"]
+    base_conf = out["baseline"]["mean_confidence_pct"]
+    for name in out:
+        out[name]["accuracy_delta_vs_baseline"] = round(
+            out[name]["accuracy_pct"] - base_acc, 2
+        )
+        out[name]["confidence_delta_vs_baseline"] = round(
+            out[name]["mean_confidence_pct"] - base_conf, 2
+        )
+    return {
+        "samples_per_activity": req.samples_per_activity,
+        "extra_noise": req.extra_noise,
+        "perturb_strength": req.perturb_strength,
+        "total_queries": len(queries),
+        "elapsed_s": round(time.time() - t_total, 2),
+        "results": out,
+        "activities": activities,
+    }
+
+
+# ─────────────────────── IMU CSV upload + example ──────────────────────────────
+def _parse_imu_csv(text: str) -> np.ndarray:
+    """Parse a free-form CSV / whitespace text into a (6, N) float32 array.
+
+    Accepts:
+      * comma-, tab-, or whitespace-separated
+      * header lines (auto-skipped if any token isn't numeric)
+      * either orientation:  (N rows × 6 cols)  or  (6 rows × N cols)
+      * '#' comment lines
+    """
+    rows: list[list[float]] = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.replace(",", " ").replace("\t", " ").split() if p.strip()]
+        try:
+            row = [float(p) for p in parts]
+        except ValueError:
+            continue  # header / non-numeric line
+        if row:
+            rows.append(row)
+
+    if not rows:
+        raise HTTPException(400, "no numeric rows found in upload")
+    # Pad short rows with NaN then drop ragged data — keep only rows that match
+    # the dominant row width.
+    widths = [len(r) for r in rows]
+    target = max(set(widths), key=widths.count)
+    rows = [r for r in rows if len(r) == target]
+    arr = np.array(rows, dtype=np.float32)  # (N, target) or (6, target) etc.
+
+    # Decide orientation:  if one of the two dims is 6, that's channels.
+    if arr.shape[1] == 6 and arr.shape[0] != 6:
+        arr = arr.T                              # (6, N)
+    elif arr.shape[0] != 6:
+        raise HTTPException(
+            400,
+            f"expected 6 IMU channels somewhere in the data; got shape {tuple(arr.shape)}",
+        )
+    return arr.astype(np.float32)
+
+
+def _resample_to_seq_len(arr: np.ndarray, seq_len: int = SEQ_LEN) -> np.ndarray:
+    """Linearly resample a (6, M) array to (6, seq_len)."""
+    if arr.shape[-1] == seq_len:
+        return arr
+    t = torch.from_numpy(arr).unsqueeze(0)
+    t = F.interpolate(t, size=seq_len, mode="linear", align_corners=False)
+    return t.squeeze(0).numpy().astype(np.float32)
+
+
+@app.post("/api/infer-upload")
+async def infer_upload(
+    file: UploadFile = File(...),
+    tta: bool = Form(False),
+    multi_prototype: bool = Form(True),
+    true_label: str | None = Form(None),
+) -> dict[str, Any]:
+    """Run real COMODO inference on a user-uploaded IMU CSV.
+
+    The CSV should have 6 numeric columns (accel_x/y/z, gyro_x/y/z) and at
+    least 100 rows. Headers are auto-stripped. Any length is resampled to the
+    model's expected 1000-sample window.
+    """
+    student = get_student()
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "file is not UTF-8 text — please upload a CSV/TSV")
+    arr = _parse_imu_csv(text)
+    original_shape = list(arr.shape)
+    arr_resampled = _resample_to_seq_len(arr)
+
+    z_norm, sims, latency_ms = _classify(
+        student, arr_resampled,
+        tta=tta, multi_prototype=multi_prototype,
+    )
+    predicted = max(sims, key=sims.get)
+    confidence = softmax_confidence(sims)
+    correct = (true_label == predicted) if true_label in ACTIVITIES else None
+
+    # Downsample for plot
+    step = max(1, arr_resampled.shape[-1] // 250)
+    return {
+        "filename": file.filename,
+        "original_shape": original_shape,
+        "resampled_shape": list(arr_resampled.shape),
+        "channels": ["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"],
+        "samples": arr_resampled[:, ::step].tolist(),
+        "sample_step": step,
+        "tta": tta,
+        "multi_prototype": multi_prototype,
+        "true_label": true_label,
+        "predicted": predicted,
+        "predicted_label": ACTIVITIES[predicted]["label"],
+        "predicted_confidence": float(confidence[predicted]),
+        "correct": correct,
+        "similarities": sims,
+        "confidence": confidence,
+        "latency_ms": round(latency_ms, 1),
+        "tta_n": TTA_N if tta else 1,
+        "k_prototypes": K_PROTOTYPES if multi_prototype else 1,
+    }
+
+
+@app.get("/api/example-csv/{activity}")
+def example_csv(activity: str, seed: int = 42) -> PlainTextResponse:
+    """Generate a downloadable example CSV for a given activity.
+
+    Audience members can grab this, open it in Excel, see what real IMU data
+    looks like, then upload it back through the UI to verify inference works.
+    """
+    if activity not in ACTIVITIES:
+        raise HTTPException(404, f"unknown activity: {activity}")
+    data = generate_imu(activity, seed=seed)            # (6, 1000)
+    rows = data.T                                       # (1000, 6) — time-major
+    header = "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z\n"
+    body = "\n".join(",".join(f"{v:.5f}" for v in row) for row in rows)
+    csv_text = header + body + "\n"
+    return PlainTextResponse(
+        csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="comodo_{activity}.csv"'},
+    )
 
 
 @app.get("/api/batched-bench")

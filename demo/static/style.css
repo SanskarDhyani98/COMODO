@@ -365,6 +365,82 @@ label.toggle input { accent-color: var(--accent-2); margin: 0; }
   font-size: 14px;
 }
 
+/* ─────────────── A/B grid (single-query before/after) ─────────────── */
+.ab-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.ab-cell {
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  position: relative;
+}
+.ab-cell.correct { border-color: var(--good); background: rgba(74,222,128,0.07); }
+.ab-cell.wrong   { border-color: var(--bad);  background: rgba(251,113,133,0.07); }
+.ab-name {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.ab-pred {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.ab-meta {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+}
+.ab-icon {
+  position: absolute;
+  top: 12px; right: 14px;
+  font-size: 18px;
+  font-weight: 700;
+}
+.ab-icon.ok  { color: var(--good); }
+.ab-icon.bad { color: var(--bad); }
+
+/* ─────────────── dropzone ─────────────── */
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 14px;
+  padding: 22px 18px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: rgba(255,255,255,0.02);
+}
+.dropzone:hover,
+.dropzone.dragover {
+  border-color: var(--accent);
+  background: rgba(124,131,255,0.07);
+}
+.dz-inner { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.dz-icon { font-size: 36px; }
+.dz-hint { color: var(--muted); font-size: 12px; }
+.dz-file {
+  margin-top: 8px;
+  color: var(--accent-2);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+
+ol.howto {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+ol.howto li b { color: var(--text); }
+
 footer {
   text-align: center;
   padding: 24px;

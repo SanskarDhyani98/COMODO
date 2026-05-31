@@ -36,6 +36,7 @@
   <button class="tab" data-tab="distillation">4. Distillation loss</button>
   <button class="tab" data-tab="results">5. Benchmark results</button>
   <button class="tab" data-tab="improvements">6. Our improvements ✨</button>
+  <button class="tab" data-tab="live">7. End-to-end live demo 🎥</button>
 </nav>
 
 <!-- ─────────────────────────── 1. Overview ─────────────────────────── -->
@@ -318,6 +319,57 @@ where  p<sup>T</sup> = softmax( z<sub>v</sub>·Qᵀ / τ<sub>t</sub> )
     </p>
   </div>
 
+  <!-- BEFORE vs AFTER accuracy (single query) -->
+  <div class="card">
+    <h2>① + ② — Before vs After: single noisy query</h2>
+    <p class="caption">
+      Run the <em>same</em> noisy IMU window through all four configurations
+      and see whether the prediction is correct. The killer demo case:
+      <b>cycling, seed 22, noise σ=0.7</b> — baseline confuses it with
+      "shaking", and every improvement flips it to the correct answer.
+    </p>
+    <div class="row">
+      <label>Activity
+        <select id="abActivity"></select>
+      </label>
+      <label>Seed
+        <input id="abSeed" type="number" value="22" />
+      </label>
+      <label>Extra noise σ
+        <input id="abNoise" type="number" step="0.05" value="0.7" />
+      </label>
+      <button id="abBtn" class="btn primary">Compare all 4 configs ▶</button>
+      <span id="abStatus" class="status-pill">idle</span>
+    </div>
+    <div id="abGrid" class="ab-grid"></div>
+  </div>
+
+  <!-- BEFORE vs AFTER accuracy (batch) -->
+  <div class="card">
+    <h2>① + ② — Before vs After: aggregate accuracy on a batch</h2>
+    <p class="caption">
+      Run <span id="batchTotalLabel">—</span> queries (6 activities × N samples
+      each) through every configuration at the chosen noise level, and
+      compare top-1 accuracy + average confidence. This is the "before vs
+      after" the audience asked about — same data, four pipelines.
+    </p>
+    <div class="row">
+      <label>Samples per activity
+        <input id="batchSamples" type="number" value="5" min="1" max="15" />
+      </label>
+      <label>Extra noise σ
+        <input id="batchNoise" type="number" step="0.05" value="0.25" />
+      </label>
+      <button id="batchBtn" class="btn primary">Run batch A/B ▶</button>
+      <span id="batchStatus" class="status-pill">idle</span>
+    </div>
+    <div class="grid two">
+      <canvas id="batchAccChart" height="260"></canvas>
+      <canvas id="batchConfChart" height="260"></canvas>
+    </div>
+    <div id="batchKv" class="kv">—</div>
+  </div>
+
   <!-- throughput curve (full width) -->
   <div class="card">
     <h2>⑤b — Throughput scaling with batch size</h2>
@@ -364,6 +416,139 @@ where  p<sup>T</sup> = softmax( z<sub>v</sub>·Qᵀ / τ<sub>t</sub> )
       </div>
       <canvas id="salChart" height="220"></canvas>
     </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 7. Live end-to-end demo ─────────────────────────── -->
+<section class="tab-panel" id="tab-live">
+  <div class="card">
+    <h2>End-to-end live pipeline</h2>
+    <p class="caption">
+      In a real wearable, the video teacher is gone by deployment — only the
+      IMU student runs. So this tab lets you supply your own data and walk
+      through the full pipeline: <b>upload IMU → plot signal → run student →
+      see prediction.</b> The video field on the left is optional, purely for
+      visual context (the model never sees it at inference).
+    </p>
+    <div class="pipeline" style="margin-top:8px">
+      <div class="node teacher">
+        <div class="node-title">🎥 Video (optional)</div>
+        <div class="node-body">For human verification only.<br>The model does not consume it.</div>
+      </div>
+      <div class="arrow">+</div>
+      <div class="node student">
+        <div class="node-title">📈 IMU CSV (required)</div>
+        <div class="node-body">6 channels (accel xyz, gyro xyz).<br>Any length — we resample to 1000.</div>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="node loss">
+        <div class="node-title">🧠 Mantis-8M student</div>
+        <div class="node-body">Forward pass on CPU.<br>~20 ms / query.</div>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="node queue">
+        <div class="node-title">🏷️ Prediction</div>
+        <div class="node-body">Calibrated probability<br>across 6 activities.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid two">
+    <!-- LEFT: VIDEO (optional, visual only) -->
+    <div class="card">
+      <h2>🎥 Video (optional, visual aid)</h2>
+      <p class="caption">
+        Upload an .mp4 / .webm. It plays here purely for the audience to see
+        what activity the IMU is supposed to represent — the COMODO student
+        never looks at video at inference.
+      </p>
+      <div class="dropzone" id="videoDrop">
+        <input type="file" id="videoFile" accept="video/*" hidden />
+        <div class="dz-inner">
+          <div class="dz-icon">🎬</div>
+          <div><b>Click or drop a video file</b></div>
+          <div class="dz-hint">.mp4, .webm, .mov</div>
+        </div>
+      </div>
+      <video id="videoPlayer" controls playsinline muted
+             style="width:100%;margin-top:14px;border-radius:10px;display:none;background:#000"></video>
+    </div>
+
+    <!-- RIGHT: IMU CSV (required) -->
+    <div class="card">
+      <h2>📈 IMU CSV (required)</h2>
+      <p class="caption">
+        Upload a CSV with 6 numeric columns (accel x/y/z, gyro x/y/z) and
+        any number of rows (we'll resample to 1000 samples).
+      </p>
+      <div class="dropzone" id="imuDrop">
+        <input type="file" id="imuFile" accept=".csv,.tsv,.txt" hidden />
+        <div class="dz-inner">
+          <div class="dz-icon">📂</div>
+          <div><b>Click or drop a CSV file</b></div>
+          <div class="dz-hint">comma-, tab-, or whitespace-separated</div>
+        </div>
+      </div>
+
+      <div style="margin-top:14px">
+        <div class="caption" style="margin-bottom:6px">
+          Don't have an IMU file? Grab one of our examples:
+        </div>
+        <div class="row" id="exampleRow"></div>
+      </div>
+
+      <div class="row" style="margin-top:18px">
+        <label>True label (for accuracy check, optional)
+          <select id="liveTrueLabel">
+            <option value="">— unknown —</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="liveTta" />
+          <span>TTA</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="liveKproto" checked />
+          <span>K-prototypes</span>
+        </label>
+        <button id="liveRunBtn" class="btn primary" disabled>Run inference ▶</button>
+        <span id="liveStatus" class="status-pill">awaiting CSV…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULT -->
+  <div class="grid two">
+    <div class="card">
+      <h2>Uploaded IMU signal</h2>
+      <canvas id="liveImuChart" height="240"></canvas>
+      <div id="liveImuMeta" class="kv" style="margin-top:10px">—</div>
+    </div>
+    <div class="card">
+      <h2>Prediction</h2>
+      <div id="livePredBox" class="pred-box">Upload (or pick) an IMU CSV and click <b>Run inference</b>.</div>
+      <h3 style="margin-top:16px">Per-class probability</h3>
+      <canvas id="liveProbChart" height="220"></canvas>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>How the upload flow works (end-to-end, in 6 steps)</h2>
+    <ol class="howto">
+      <li><b>Browser uploads the CSV</b> as <span class="mono">multipart/form-data</span>
+          to <span class="mono">POST /api/infer-upload</span>.</li>
+      <li>Server parses the text — header lines are auto-detected and skipped.
+          Columns / rows can be either orientation (we autodetect which dim is 6).</li>
+      <li>The (6, M) array is <b>linearly interpolated to (6, 1000)</b> so it
+          matches the Mantis-8M-compatible window length.</li>
+      <li>The student model (already loaded into memory at warmup) does <b>one
+          forward pass on CPU</b>, ~20 ms.</li>
+      <li>The output 128-d embedding is L2-normalised and compared against
+          either 1 (baseline) or K=5 (improved) reference embeddings per
+          activity via cosine similarity.</li>
+      <li>Cosines are passed through a temperature-scaled softmax →
+          calibrated probability distribution → top-1 wins.</li>
+    </ol>
   </div>
 </section>
 

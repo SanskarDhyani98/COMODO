@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>COMODO — Cross-Modal Video-to-IMU Distillation · Live Demo</title>
+<link rel="stylesheet" href="/static/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="brand">
+      <span class="badge">arXiv:2503.07259</span>
+      <h1>COMODO</h1>
+      <p class="subtitle">
+        Cross-Modal Video-to-IMU Distillation for Efficient Egocentric
+        Human Activity Recognition
+      </p>
+    </div>
+    <div class="status-card" id="statusCard">
+      <div class="status-row"><span>Model</span><b id="statusModel">Mantis-8M + MLP head</b></div>
+      <div class="status-row"><span>Device</span><b id="statusDevice">—</b></div>
+      <div class="status-row"><span>Status</span><b id="statusState">cold</b></div>
+      <div class="status-row"><span>Load time</span><b id="statusLoad">—</b></div>
+      <button id="warmupBtn" class="btn primary">Warm up model</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="overview">1. The idea</button>
+  <button class="tab" data-tab="pipeline">2. Architecture</button>
+  <button class="tab" data-tab="demo">3. Live inference</button>
+  <button class="tab" data-tab="distillation">4. Distillation loss</button>
+  <button class="tab" data-tab="results">5. Benchmark results</button>
+  <button class="tab" data-tab="improvements">6. Our improvements ✨</button>
+</nav>
+
+<!-- ─────────────────────────── 1. Overview ─────────────────────────── -->
+<section class="tab-panel active" id="tab-overview">
+  <div class="grid two">
+    <div class="card">
+      <h2>The problem</h2>
+      <p>
+        Egocentric Human Activity Recognition (HAR) wants to know what a
+        person wearing a body-mounted device is doing — <em>walking,
+        cooking, climbing stairs.</em>
+      </p>
+      <p>
+        Cameras (video) are accurate but power-hungry, privacy-invasive,
+        and impractical for always-on wearables. IMU sensors
+        (accelerometer + gyroscope) are cheap, private, and battery-friendly
+        — but their data is hard to label and small in quantity.
+      </p>
+    </div>
+    <div class="card">
+      <h2>The COMODO idea</h2>
+      <p>
+        Use a <b>large pretrained video model</b> as a <em>silent teacher</em>
+        and distil its knowledge into a small <b>IMU student</b> —
+        <em>without any labels</em>.
+      </p>
+      <ul class="bullets">
+        <li>📹 <b>Teacher</b>: VideoMAE / TimeSformer (frozen).</li>
+        <li>📈 <b>Student</b>: Mantis-8M / MOMENT time-series model.</li>
+        <li>🔁 <b>Trick</b>: a FIFO queue of video embeddings keeps the
+            reference distribution stable while we distil.</li>
+        <li>🏷️ <b>No labels needed</b> — pure self-supervised cross-modal
+            transfer.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="grid three">
+    <div class="metric">
+      <div class="metric-val">+5.2%</div>
+      <div class="metric-lab">acc@1 over IMU2CLIP on egoexo4d</div>
+    </div>
+    <div class="metric">
+      <div class="metric-val">94.8%</div>
+      <div class="metric-lab">acc@1 on UESTC-MMEA-CL</div>
+    </div>
+    <div class="metric">
+      <div class="metric-val">0 labels</div>
+      <div class="metric-lab">used for distillation pretraining</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 2. Pipeline ─────────────────────────── -->
+<section class="tab-panel" id="tab-pipeline">
+  <div class="card">
+    <h2>End-to-end pipeline</h2>
+    <div class="pipeline">
+      <div class="node teacher">
+        <div class="node-title">📹 Video teacher</div>
+        <div class="node-body">VideoMAE / TimeSformer<br><span class="mono">→ z<sub>v</sub></span></div>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="node queue">
+        <div class="node-title">🔁 FIFO queue</div>
+        <div class="node-body">stable video<br>reference distribution</div>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="node loss">
+        <div class="node-title">⚖️ COMODOLoss</div>
+        <div class="node-body">cross-modal<br>distillation (no labels)</div>
+      </div>
+      <div class="arrow up">⟵</div>
+      <div class="node student">
+        <div class="node-title">📈 IMU student</div>
+        <div class="node-body">Mantis-8M + MLP<br><span class="mono">→ z<sub>x</sub></span></div>
+      </div>
+    </div>
+    <p class="caption">
+      During training, paired (video, IMU) clips are encoded by the two
+      branches. The student is pulled toward the teacher distribution
+      via the COMODO loss. At inference, only the IMU student runs.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Model loaded in this demo</h2>
+    <div id="modelInfo" class="kv">Press "Warm up model" to load Mantis-8M.</div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 3. Demo ─────────────────────────── -->
+<section class="tab-panel" id="tab-demo">
+  <div class="card">
+    <h2>1) Pick an activity prototype</h2>
+    <p class="caption">
+      The demo synthesises a 10-second 6-channel IMU window with the
+      frequency / amplitude signature of the chosen activity. Then the
+      real Mantis-8M-backed student model runs a forward pass on the CPU
+      and returns a 128-d embedding.
+    </p>
+    <div id="activityGrid" class="activity-grid"></div>
+    <div class="row">
+      <label>Random seed
+        <input id="seedInput" type="number" value="42" min="0" max="9999" />
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="ttaToggle" />
+        <span>Test-Time Augmentation</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="kprotoToggle" />
+        <span>K-prototype matching (K=5)</span>
+      </label>
+      <button id="runBtn" class="btn primary">Run inference ▶</button>
+      <span id="runStatus" class="status-pill">idle</span>
+    </div>
+  </div>
+
+  <div class="grid two">
+    <div class="card">
+      <h2>IMU signal (synthetic)</h2>
+      <canvas id="imuChart" height="240"></canvas>
+    </div>
+    <div class="card">
+      <h2>Output embedding (128-d, L2-normalised)</h2>
+      <canvas id="embedChart" height="240"></canvas>
+    </div>
+  </div>
+
+  <div class="grid two">
+    <div class="card">
+      <h2>Similarity to each activity prototype</h2>
+      <canvas id="simChart" height="240"></canvas>
+    </div>
+    <div class="card">
+      <h2>Prediction</h2>
+      <div id="predBox" class="pred-box">Run inference to see the model's call.</div>
+      <h3 style="margin-top:18px">Latency</h3>
+      <div id="latencyBox" class="kv">—</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 4. Distillation loss ─────────────────────────── -->
+<section class="tab-panel" id="tab-distillation">
+  <div class="card">
+    <h2>What the COMODO loss does</h2>
+    <p>
+      For each (video, IMU) pair we compute embeddings <span class="mono">z<sub>v</sub></span>
+      and <span class="mono">z<sub>x</sub></span>. The student is trained so that
+      its <em>similarity distribution</em> over a queue of past video embeddings
+      matches the teacher's similarity distribution over the same queue.
+    </p>
+    <pre class="formula">
+ℒ = − Σᵢ p<sup>T</sup>ᵢ · log p<sup>S</sup>ᵢ
+where  p<sup>T</sup> = softmax( z<sub>v</sub>·Qᵀ / τ<sub>t</sub> )
+       p<sup>S</sup> = softmax( z<sub>x</sub>·Qᵀ / τ<sub>s</sub> )</pre>
+    <p class="caption">
+      Below, we run one real loss step on the chosen activity. The simulated
+      video queue is randomly initialised, so the absolute number is a
+      sanity-check, not a benchmark — what matters is that the gradient flows.
+    </p>
+    <div class="row">
+      <label>Activity
+        <select id="lossActivity"></select>
+      </label>
+      <label>Seed
+        <input id="lossSeed" type="number" value="42" min="0" />
+      </label>
+      <button id="lossBtn" class="btn primary">Compute COMODOLoss ▶</button>
+    </div>
+    <div id="lossBox" class="kv">—</div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 5. Results ─────────────────────────── -->
+<section class="tab-panel" id="tab-results">
+  <div class="card">
+    <h2>Paper benchmark — best acc@1 per (method, dataset, IMU backbone)</h2>
+    <p class="caption">
+      Aggregated from <span class="mono">results/unsupervised_result/results.json</span>.
+      For every configuration we keep the best top-1 accuracy across all
+      training-hyperparameter runs.
+    </p>
+    <canvas id="resultsChart" height="320"></canvas>
+  </div>
+  <div class="card">
+    <h2>Full results table</h2>
+    <div class="table-wrap">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th>Method</th><th>IMU backbone</th><th>Dataset</th>
+            <th>acc@1</th><th>acc@3</th><th>acc@5</th><th>runs</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────── 6. Improvements ─────────────────────────── -->
+<section class="tab-panel" id="tab-improvements">
+  <div class="card">
+    <h2>Our six inference-time improvements</h2>
+    <p class="caption">
+      The COMODO paper trains a strong IMU student, but the way you <em>use</em>
+      it at inference matters too. None of these need retraining — they all
+      run on top of the same frozen Mantis-8M student we loaded.
+    </p>
+    <div class="improv-grid">
+      <div class="improv-card">
+        <div class="improv-num">1</div>
+        <h3>Multi-prototype matching</h3>
+        <p>Compare to <b>K=5</b> reference embeddings per class instead of one.
+           Reduces variance — one unlucky reference no longer poisons the class.</p>
+      </div>
+      <div class="improv-card">
+        <div class="improv-num">2</div>
+        <h3>Test-Time Augmentation</h3>
+        <p>Run the model on <b>N=8</b> augmented copies of the input
+           (noise + time-shift + amplitude jitter) and average the embeddings.
+           Standard trick from image classification.</p>
+      </div>
+      <div class="improv-card">
+        <div class="improv-num">3</div>
+        <h3>Noise-robustness sweep</h3>
+        <p>Inject Gaussian noise (loose strap, vibration) into the IMU and
+           measure accuracy. Proves the improvements are real, not cosmetic.</p>
+      </div>
+      <div class="improv-card">
+        <div class="improv-num">4</div>
+        <h3>Channel saliency</h3>
+        <p>Gradient × input tells us <b>which IMU channel</b> mattered most.
+           Turns the black box into something a wearable engineer can debug.</p>
+      </div>
+      <div class="improv-card">
+        <div class="improv-num">5</div>
+        <h3>Batched inference</h3>
+        <p>Building reference embeddings: 30 sequential forward passes vs
+           <b>1 batched</b> pass. Same outputs, much lower latency.</p>
+      </div>
+      <div class="improv-card">
+        <div class="improv-num">6</div>
+        <h3>Confidence calibration</h3>
+        <p>Convert raw cosine similarities to a softmax probability
+           ("87% running") via a temperature-scaled softmax. Non-ML viewers
+           can finally read the output.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- noise robustness sweep -->
+  <div class="card">
+    <h2>③ — Robustness under sensor noise</h2>
+    <p class="caption">
+      We sweep added Gaussian noise σ from 0 → 1.2 sensor-units and measure
+      classification accuracy across all 6 activities. Query signals also use
+      ±15% parameter perturbation to simulate person-to-person variation.
+      Each point averages <span id="sweepSamplesLabel">—</span> queries.
+    </p>
+    <div class="row">
+      <label>Samples per activity per point
+        <input id="sweepSamples" type="number" value="4" min="1" max="10" />
+      </label>
+      <button id="sweepBtn" class="btn primary">Run sweep ▶</button>
+      <span id="sweepStatus" class="status-pill">idle</span>
+    </div>
+    <canvas id="sweepChart" height="320"></canvas>
+    <p class="caption">
+      The story is the <b>shape of the curve</b>: the system stays at
+      ceiling until σ≈0.2, degrades gracefully through σ=0.5, then collapses
+      toward chance (≈16% for 6 classes) at σ=1.2 — confirming the Mantis-8M
+      features carry real activity information rather than just memorising
+      the prototypes. On this synthetic data the four inference-time variants
+      land within noise of one another (improvements show up most clearly on
+      real Ego4D / EgoExo4D — see <b>Benchmark results</b> tab).
+    </p>
+  </div>
+
+  <!-- throughput curve (full width) -->
+  <div class="card">
+    <h2>⑤b — Throughput scaling with batch size</h2>
+    <p class="caption">
+      How many IMU windows can the student process per second on CPU?
+      Wearable deployments often batch sensor windows from multiple users
+      (or a sliding-window stream from one user) — bigger batches amortise
+      the Python/PyTorch overhead and unlock vectorised matrix kernels.
+    </p>
+    <div class="row">
+      <button id="thrBtn" class="btn primary">Run throughput benchmark ▶</button>
+      <span id="thrStatus" class="status-pill">idle</span>
+    </div>
+    <canvas id="thrChart" height="240"></canvas>
+    <div id="thrKv" class="kv">—</div>
+  </div>
+
+  <div class="grid two">
+    <!-- batched bench -->
+    <div class="card">
+      <h2>⑤a Sequential vs batched inference</h2>
+      <p class="caption">
+        Building 30 reference embeddings (6 activities × K=5):
+        loop-then-forward vs one big batch.
+      </p>
+      <canvas id="batchedChart" height="220"></canvas>
+      <div id="batchedKv" class="kv">—</div>
+    </div>
+
+    <!-- saliency -->
+    <div class="card">
+      <h2>④ Per-channel saliency</h2>
+      <p class="caption">
+        Gradient-×-input importance for the activity you select.
+      </p>
+      <div class="row">
+        <label>Activity
+          <select id="salActivity"></select>
+        </label>
+        <label>Seed
+          <input id="salSeed" type="number" value="42" />
+        </label>
+        <button id="salBtn" class="btn primary">Compute saliency ▶</button>
+      </div>
+      <canvas id="salChart" height="220"></canvas>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>
+    COMODO · UNSW Sydney · Chen et al. 2025 ·
+    <a href="https://arxiv.org/pdf/2503.07259" target="_blank">paper</a>
+  </p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
